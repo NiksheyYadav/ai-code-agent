@@ -1,0 +1,44 @@
+# Secrets
+.env
+.env.*
+!.env.example
+!ui/.env.example
+ui/.env.local
+
+# Dependencies / build output
+node_modules/
+ui/node_modules/
+ui/.next/
+ui/out/
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Runtime state and generated output
+generated/
+workspaces/
+legacy/
+projects/
+memory/
+
+# Logs / scratch
+*.log
+test_output.txt
+0.39.0
+.DS_Store
+
+# Local scratch scripts (not part of the product)
+check_env.py
+debug_*.py
+simple_test.py
+test_env.py
+test_generation.py
+test_import.py
+test_script.py
+test_server.py

@@ -1,0 +1,5 @@
+# Only needed for MODEL_BACKEND=local (runs a Hugging Face model in-process).
+-r requirements.txt
+torch>=2.2
+transformers>=4.44
+accelerate>=0.30

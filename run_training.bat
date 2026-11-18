@@ -1,0 +1,10 @@
+off
+1
+echo
+Training
+complete.
+Check
+training_output.txt
+for
+results.
+pause

@@ -1,0 +1,190 @@
+import sys
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from agent.server import create_app  # noqa: E402
+from agent.settings import ConfigError, Settings, hash_key  # noqa: E402
+
+KEY_A, KEY_B = "key-alice", "key-bob"
+
+
+class StubClient:
+    """Returns whatever `reply` is set to; records prompts."""
+
+    name = "stub"
+
+    def __init__(self):
+        self.reply = "FILE: main.py\n```python\nprint('hi')\n```"
+        self.calls = []
+
+    def complete(self, system, user):
+        self.calls.append(user)
+        return self.reply
+
+
+def make_settings(tmp_path, **kw):
+    base = dict(
+        model_backend="mock",
+        workspaces_dir=tmp_path / "ws",
+        api_key_hashes={hash_key(KEY_A): "alice", hash_key(KEY_B): "bob"},
+        rate_limit_per_minute=1000,
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+@pytest.fixture
+def stub():
+    return StubClient()
+
+
+@pytest.fixture
+def client(tmp_path, stub):
+    return TestClient(create_app(make_settings(tmp_path), stub))
+
+
+def auth(key=KEY_A):
+    return {"Authorization": f"Bearer {key}"}
+
+
+# ---------------------------------------------------------------- basics / auth
+def test_health_is_public(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200 and r.json()["auth_required"] is True
+
+
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer nope"}, {"Authorization": "Basic abc"}])
+def test_auth_required(client, headers):
+    assert client.get("/api/tree", headers=headers).status_code == 401
+    assert client.post("/api/generate", json={"prompt": "x"}, headers=headers).status_code == 401
+
+
+def test_unsafe_config_is_rejected(tmp_path):
+    with pytest.raises(ConfigError):
+        create_app(make_settings(tmp_path, api_key_hashes={}), StubClient())
+    with pytest.raises(ConfigError):
+        create_app(make_settings(tmp_path, model_backend="hosted", llm_api_key=""), StubClient())
+
+
+# ------------------------------------------------------------ generate / tree / io
+def test_generate_save_read_roundtrip(client):
+    r = client.post("/api/generate", json={"prompt": "hello"}, headers=auth())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["files"] == ["main.py"] and body["code"] == "print('hi')"
+
+    tree = client.get("/api/tree", headers=auth()).json()
+    assert [n["path"] for n in tree] == ["main.py"]
+
+    r = client.post("/api/files/save", json={"path": "pkg/new.py", "content": "x = 1\n"}, headers=auth())
+    assert r.status_code == 200
+    r = client.get("/api/files/content", params={"path": "pkg/new.py"}, headers=auth())
+    assert r.json()["content"] == "x = 1\n"
+
+
+def test_workspaces_are_isolated_per_user(client):
+    client.post("/api/files/save", json={"path": "secret.txt", "content": "alice"}, headers=auth(KEY_A))
+    assert client.get("/api/tree", headers=auth(KEY_B)).json() == []
+    r = client.get("/api/files/content", params={"path": "secret.txt"}, headers=auth(KEY_B))
+    assert r.status_code == 404
+
+
+# --------------------------------------------------------------- path traversal
+BAD_PATHS = [
+    "../x", "..\\x", "a/../../x", "C:\\Windows\\x.py", "C:x.py", "/etc/x",
+    "\\\\srv\\share\\x", ".", "a/..", "", "a.py:stream", "dir/a.py:$DATA",
+]
+
+
+@pytest.mark.parametrize("path", BAD_PATHS)
+def test_traversal_rejected_on_every_file_endpoint(client, tmp_path, path):
+    r = client.post("/api/files/save", json={"path": path, "content": "pwn"}, headers=auth())
+    assert r.status_code == 400, (path, r.text)
+    r = client.get("/api/files/content", params={"path": path}, headers=auth())
+    assert r.status_code == 400, (path, r.text)
+    for ep in ("edit", "fix"):
+        r = client.post(f"/api/{ep}", json={"prompt": "x", "file_path": path, "content": ""}, headers=auth())
+        assert r.status_code in (400, 404), (ep, path, r.text)
+    assert not (tmp_path / "x").exists() and not (tmp_path / "ws" / "x").exists()
+
+
+def test_model_returned_traversal_path_is_skipped(client, stub, tmp_path):
+    stub.reply = "FILE: ../../evil.py\n```python\nboom\n```\nFILE: ok.py\n```python\nx=1\n```"
+    r = client.post("/api/generate", json={"prompt": "x"}, headers=auth())
+    assert r.status_code == 200
+    assert r.json()["files"] == ["ok.py"] and r.json()["warnings"]
+    assert not (tmp_path / "evil.py").exists()
+
+
+# ------------------------------------------------------------------ edit / fix
+def test_edit_uses_editor_content_and_writes_file(client, stub):
+    stub.reply = "FILE: a.py\n```python\nprint('new')\n```"
+    r = client.post("/api/edit", json={"prompt": "change it", "file_path": "a.py", "content": "print('old')"}, headers=auth())
+    assert r.status_code == 200, r.text
+    assert "print('old')" in stub.calls[-1]
+    assert client.get("/api/files/content", params={"path": "a.py"}, headers=auth()).json()["content"] == "print('new')"
+
+
+def test_fix_skips_model_when_python_is_valid(client, stub):
+    client.post("/api/files/save", json={"path": "ok.py", "content": "x = 1\n"}, headers=auth())
+    r = client.post("/api/fix", json={"prompt": "", "file_path": "ok.py"}, headers=auth())
+    assert r.status_code == 200 and "No syntax errors" in r.json()["message"]
+    assert stub.calls == []
+
+
+def test_fix_rejects_model_output_that_is_still_broken(client, stub):
+    client.post("/api/files/save", json={"path": "bad.py", "content": "def f(:\n"}, headers=auth())
+    stub.reply = "FILE: bad.py\n```python\ndef still(:\n```"
+    r = client.post("/api/fix", json={"prompt": "", "file_path": "bad.py"}, headers=auth())
+    assert r.status_code == 422
+    assert client.get("/api/files/content", params={"path": "bad.py"}, headers=auth()).json()["content"] == "def f(:\n"
+
+
+def test_fix_repairs_python(client, stub):
+    client.post("/api/files/save", json={"path": "bad.py", "content": "def f(:\n"}, headers=auth())
+    stub.reply = "FILE: bad.py\n```python\ndef f():\n    pass\n```"
+    r = client.post("/api/fix", json={"prompt": "", "file_path": "bad.py"}, headers=auth())
+    assert r.status_code == 200 and "syntax error" in stub.calls[-1].lower()
+
+
+# ---------------------------------------------------------------------- limits
+def test_rate_limit(tmp_path, stub):
+    c = TestClient(create_app(make_settings(tmp_path, rate_limit_per_minute=2), stub))
+    codes = [c.post("/api/generate", json={"prompt": "x"}, headers=auth()).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+
+
+def test_prompt_and_file_size_limits(tmp_path, stub):
+    c = TestClient(create_app(make_settings(tmp_path, max_prompt_chars=10, max_file_bytes=20), stub))
+    assert c.post("/api/generate", json={"prompt": "x" * 11}, headers=auth()).status_code == 413
+    assert c.post("/api/files/save", json={"path": "a.txt", "content": "x" * 21}, headers=auth()).status_code == 413
+
+
+def test_editor_content_is_size_limited_and_never_reaches_model(tmp_path, stub):
+    c = TestClient(create_app(make_settings(tmp_path, max_file_bytes=50), stub))
+    big = "x" * 51
+    for ep in ("edit", "fix"):
+        r = c.post(f"/api/{ep}", json={"prompt": "go", "file_path": "a.py", "content": big}, headers=auth())
+        assert r.status_code == 413, (ep, r.text)
+    assert stub.calls == []
+
+
+def test_model_failure_is_a_clean_502(client, stub):
+    from agent.models import ModelError
+
+    def boom(system, user):
+        raise ModelError("The model timed out.")
+
+    stub.complete = boom
+    r = client.post("/api/generate", json={"prompt": "x"}, headers=auth())
+    assert r.status_code == 502 and r.json()["message"] == "The model timed out."
+
+
+def test_auth_disabled_mode_uses_single_dev_workspace(tmp_path, stub):
+    c = TestClient(create_app(make_settings(tmp_path, auth_disabled=True, api_key_hashes={}), stub))
+    assert c.post("/api/generate", json={"prompt": "x"}).status_code == 200
+    assert (tmp_path / "ws" / "dev" / "main.py").exists()
