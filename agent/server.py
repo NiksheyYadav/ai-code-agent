@@ -47,6 +47,8 @@ class AgentRequest(BaseModel):
     prompt: str = Field(default="", max_length=20000)
     file_path: Optional[str] = Field(default=None, max_length=300)
     content: Optional[str] = Field(default=None, max_length=2_000_000)
+    # edit/fix only: return the proposed file without writing it, so the UI can show a diff.
+    preview: bool = False
 
 
 class SaveRequest(BaseModel):
@@ -141,11 +143,11 @@ def create_app(settings: Optional[Settings] = None, client: Optional[ModelClient
     @app.post("/api/edit")
     def edit(req: AgentRequest, ws: Workspace = Depends(rate_limited)):
         check_prompt(req)
-        return run(service.edit, ws, client, req.prompt, req.file_path, req.content)
+        return run(service.edit, ws, client, req.prompt, req.file_path, req.content, req.preview)
 
     @app.post("/api/fix")
     def fix(req: AgentRequest, ws: Workspace = Depends(rate_limited)):
         check_prompt(req)
-        return run(service.fix, ws, client, req.prompt, req.file_path, req.content)
+        return run(service.fix, ws, client, req.prompt, req.file_path, req.content, req.preview)
 
     return app

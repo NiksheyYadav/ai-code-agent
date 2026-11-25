@@ -5,7 +5,7 @@ Generate, edit and fix code from natural-language prompts. A Next.js UI talks to
 ## Architecture
 
 ```
-ui/        Next.js 14 web app (editor, file tree, prompt box)
+ui/        Next.js 14 web app (CodeMirror editor, file tree, agent panel, command palette). Design rules: ui/DESIGN.md
 agent/     FastAPI backend
   server.py     HTTP API, auth, rate limiting, CORS
   workspace.py  sandboxed per-user file access (all paths go through here)
@@ -40,7 +40,7 @@ Quick start without a model or keys (demo output only): in `.env` set `MODEL_BAC
 | Variable | Purpose |
 |---|---|
 | `MODEL_BACKEND` | `hosted` (API), `local` (Hugging Face model, needs `requirements-local.txt`), or `mock` (canned demo output) |
-| `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | Hosted model. `anthropic` (default) or `openai` (any OpenAI-compatible endpoint) |
+| `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | Hosted model. `anthropic` (default), `nvidia` (NVIDIA NIM; key in `NVIDIA_API_KEY`) or `openai` (any OpenAI-compatible endpoint) |
 | `LOCAL_MODEL`, `HF_TOKEN` | Local model id and optional Hugging Face token |
 | `API_KEYS` | Comma-separated user keys. Required unless `AUTH_DISABLED=true`. One key = one private workspace |
 | `AUTH_DISABLED` | `true` only for local single-user development |
@@ -48,7 +48,7 @@ Quick start without a model or keys (demo output only): in `.env` set `MODEL_BAC
 | `RATE_LIMIT_PER_MINUTE` | Per-user limit on generate/edit/fix |
 | `WORKSPACES_DIR` | Where user workspaces are stored (default `./workspaces`) |
 
-The UI's backend URL is `NEXT_PUBLIC_API_URL` in `ui/.env.local` (set at build time). Enter your API key in the field in the header.
+The UI's backend URL is `NEXT_PUBLIC_API_URL` in `ui/.env.local` (set at build time). If the server requires auth, the app asks for your API key on first load (also under the key icon in the header → Settings).
 
 ## API
 

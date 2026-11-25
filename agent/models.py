@@ -13,6 +13,9 @@ from typing import Protocol
 from .settings import Settings
 
 
+DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+
+
 class ModelError(Exception):
     """The model backend failed. The message is safe to show to users."""
 
@@ -77,16 +80,20 @@ class HostedClient:
                     "system": system,
                     "messages": [{"role": "user", "content": user}],
                 }
-            else:
-                url = (s.llm_base_url or "https://api.openai.com/v1") + "/chat/completions"
+            else:  # OpenAI-compatible chat completions (openai, nvidia NIM, ...)
+                nvidia = s.llm_provider == "nvidia"
+                default_base = "https://integrate.api.nvidia.com/v1" if nvidia else "https://api.openai.com/v1"
+                model = s.llm_model or (DEFAULT_NVIDIA_MODEL if nvidia else "")
+                if not model:
+                    raise ModelError("LLM_MODEL must be set for the openai provider")
+                url = (s.llm_base_url or default_base) + "/chat/completions"
                 headers = {"authorization": f"Bearer {s.llm_api_key}", "content-type": "application/json"}
                 body = {
-                    "model": s.llm_model,
+                    "model": model,
                     "max_tokens": s.llm_max_tokens,
+                    "temperature": 0.2,
                     "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 }
-                if not s.llm_model:
-                    raise ModelError("LLM_MODEL must be set for the openai provider")
 
             resp = httpx.post(url, headers=headers, json=body, timeout=s.llm_timeout_seconds)
         except httpx.TimeoutException:
@@ -101,7 +108,12 @@ class HostedClient:
             data = resp.json()
             if s.llm_provider == "anthropic":
                 return "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
-            return data["choices"][0]["message"]["content"] or ""
+            text = data["choices"][0]["message"]["content"] or ""
+            if not text.strip():
+                raise ModelError("The model returned an empty response. Try again or raise LLM_MAX_TOKENS.")
+            return text
+        except ModelError:
+            raise
         except (KeyError, IndexError, ValueError, TypeError):
             raise ModelError("The model provider returned an unexpected response.")
 

@@ -41,7 +41,9 @@ export async function apiFetch(path, { method = 'GET', body, apiKey } = {}) {
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     const fallback = response.status === 401 ? 'Missing or invalid API key' : `Request failed (HTTP ${response.status})`;
-    throw new Error((data && (data.message || data.detail)) || fallback);
+    const err = new Error((data && (data.message || data.detail)) || fallback);
+    err.status = response.status;
+    throw err;
   }
   return data;
 }

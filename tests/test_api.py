@@ -129,6 +129,27 @@ def test_edit_uses_editor_content_and_writes_file(client, stub):
     assert client.get("/api/files/content", params={"path": "a.py"}, headers=auth()).json()["content"] == "print('new')"
 
 
+def test_preview_proposes_without_writing_then_save_accepts(client, stub):
+    client.post("/api/files/save", json={"path": "a.py", "content": "x = 1\n"}, headers=auth())
+    stub.reply = "FILE: a.py\n```python\nx = 2\n```"
+    r = client.post("/api/edit", json={"prompt": "bump", "file_path": "a.py", "preview": True}, headers=auth())
+    assert r.status_code == 200, r.text
+    assert r.json()["preview"] is True and r.json()["code"] == "x = 2"
+    # nothing was written
+    assert client.get("/api/files/content", params={"path": "a.py"}, headers=auth()).json()["content"] == "x = 1\n"
+    # accepting = saving the proposed code
+    client.post("/api/files/save", json={"path": "a.py", "content": r.json()["code"]}, headers=auth())
+    assert client.get("/api/files/content", params={"path": "a.py"}, headers=auth()).json()["content"] == "x = 2"
+
+
+def test_fix_preview_does_not_write(client, stub):
+    client.post("/api/files/save", json={"path": "bad.py", "content": "def f(:\n"}, headers=auth())
+    stub.reply = "FILE: bad.py\n```python\ndef f():\n    pass\n```"
+    r = client.post("/api/fix", json={"file_path": "bad.py", "preview": True}, headers=auth())
+    assert r.status_code == 200 and r.json()["preview"] is True
+    assert client.get("/api/files/content", params={"path": "bad.py"}, headers=auth()).json()["content"] == "def f(:\n"
+
+
 def test_fix_skips_model_when_python_is_valid(client, stub):
     client.post("/api/files/save", json={"path": "ok.py", "content": "x = 1\n"}, headers=auth())
     r = client.post("/api/fix", json={"prompt": "", "file_path": "ok.py"}, headers=auth())
@@ -188,3 +209,45 @@ def test_auth_disabled_mode_uses_single_dev_workspace(tmp_path, stub):
     c = TestClient(create_app(make_settings(tmp_path, auth_disabled=True, api_key_hashes={}), stub))
     assert c.post("/api/generate", json={"prompt": "x"}).status_code == 200
     assert (tmp_path / "ws" / "dev" / "main.py").exists()
+
+
+# ------------------------------------------------------------- NVIDIA provider
+def test_nvidia_key_is_read_from_either_env_name(monkeypatch, tmp_path):
+    for name in ("NVIDIA_API_KEY", "nvidia_llm_api", "LLM_API_KEY", "MODEL_BACKEND", "LLM_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("agent.settings.load_dotenv", lambda path: None)
+    monkeypatch.setenv("LLM_PROVIDER", "nvidia")
+    monkeypatch.setenv("MODEL_BACKEND", "hosted")
+    monkeypatch.setenv("nvidia_llm_api", "nvapi-test")
+    s = Settings.from_env()
+    assert s.llm_provider == "nvidia" and s.llm_api_key == "nvapi-test"
+
+
+def test_nvidia_hosted_client_request_shape(monkeypatch):
+    import httpx
+
+    from agent.models import DEFAULT_NVIDIA_MODEL, HostedClient
+
+    seen = {}
+
+    def fake_post(url, headers, json, timeout):
+        seen.update(url=url, headers=headers, body=json)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "FILE: a.py\n```python\nx=1\n```"}}]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    s = Settings(model_backend="hosted", llm_provider="nvidia", llm_api_key="nvapi-test")
+    out = HostedClient(s).complete("sys", "user")
+    assert out.startswith("FILE: a.py")
+    assert seen["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
+    assert seen["headers"]["authorization"] == "Bearer nvapi-test"
+    assert seen["body"]["model"] == DEFAULT_NVIDIA_MODEL
+
+
+def test_empty_model_reply_is_a_clean_error(monkeypatch):
+    import httpx
+
+    from agent.models import HostedClient, ModelError
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(200, json={"choices": [{"message": {"content": "  "}}]}))
+    with pytest.raises(ModelError):
+        HostedClient(Settings(model_backend="hosted", llm_provider="nvidia", llm_api_key="k")).complete("s", "u")

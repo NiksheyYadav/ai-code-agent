@@ -55,8 +55,10 @@ def _complete(client: ModelClient, user: str) -> str:
         raise ServiceError(502, str(e))
 
 
-def _result(message: str, files: List[str], code: str, warnings: Optional[List[str]] = None) -> Dict:
+def _result(message: str, files: List[str], code: str, warnings: Optional[List[str]] = None, preview: bool = False) -> Dict:
     out = {"status": "success", "message": message, "files": files, "file_path": files[0] if files else None, "code": code}
+    if preview:
+        out["preview"] = True
     if warnings:
         out["warnings"] = warnings
     return out
@@ -106,7 +108,7 @@ def _load_current(ws: Workspace, file_path: Optional[str], content: Optional[str
     return rel, current
 
 
-def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str]) -> Dict:
+def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str], preview: bool = False) -> Dict:
     if not prompt.strip():
         raise ServiceError(400, "Describe the change you want")
     rel, current = _load_current(ws, file_path, content)
@@ -118,6 +120,8 @@ def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[st
     new_code = _pick(raw, rel)
     if new_code is None:
         raise ServiceError(502, "The model did not return an updated file.")
+    if preview:  # propose only; the client saves via /api/files/save once the user accepts
+        return _result(f"Proposed changes to {rel}", [rel], new_code, preview=True)
     try:
         ws.write(rel, new_code)
     except WorkspaceError as e:
@@ -125,7 +129,7 @@ def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[st
     return _result(f"Updated {rel}", [rel], new_code)
 
 
-def fix(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str]) -> Dict:
+def fix(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str], preview: bool = False) -> Dict:
     rel, current = _load_current(ws, file_path, content)
     is_python = rel.endswith(".py")
     problem = prompt.strip()
@@ -152,6 +156,8 @@ def fix(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str
             ast.parse(fixed)
         except SyntaxError:
             raise ServiceError(422, "The model's fix still has syntax errors; nothing was saved.")
+    if preview:
+        return _result(f"Proposed fix for {rel}", [rel], fixed, preview=True)
     try:
         ws.write(rel, fixed)
     except WorkspaceError as e:
