@@ -24,10 +24,8 @@ Rules:
 
 MAX_FILES_PER_REQUEST = 12
 
-_FILE_BLOCK = re.compile(
-    r"^FILE:[ \t]*(?P<path>[^\r\n]+?)[ \t]*\r?\n```[^\r\n]*\r?\n(?P<code>.*?)\r?\n```[ \t]*$",
-    re.MULTILINE | re.DOTALL,
-)
+_FILE_HEADER = re.compile(r"^FILE:[ \t]*(?P<path>[^\r\n]+?)[ \t]*\r?\n(?P<fence>`{3,})[^\r\n]*\r?\n", re.MULTILINE)
+_CLOSING_FENCE = re.compile(r"^`{3,}[ \t]*$", re.MULTILINE)
 _ANY_FENCE = re.compile(r"```[^\r\n]*\r?\n(?P<code>.*?)\r?\n```", re.DOTALL)
 
 
@@ -39,8 +37,24 @@ class ServiceError(Exception):
 
 
 def parse_files(text: str) -> List[Tuple[str, str]]:
-    """Extract (path, content) pairs from a model response."""
-    return [(m.group("path").strip().strip("`"), m.group("code")) for m in _FILE_BLOCK.finditer(text or "")]
+    """Extract (path, content) pairs from a model response.
+
+    A file's content runs to the LAST bare fence line before the next ``FILE:`` header, so files
+    that themselves contain fenced code (README.md, docs) are not cut at the first inner fence.
+    A block with no closing fence (truncated output) is dropped rather than saved half-written.
+    """
+    text = text or ""
+    headers = list(_FILE_HEADER.finditer(text))
+    files: List[Tuple[str, str]] = []
+    for i, h in enumerate(headers):
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        body = text[h.end():end]
+        closers = list(_CLOSING_FENCE.finditer(body))
+        if not closers:
+            continue
+        code = body[: closers[-1].start()].rstrip("\r\n")
+        files.append((h.group("path").strip().strip("`"), code))
+    return files
 
 
 def _single_block(text: str) -> Optional[str]:
@@ -90,9 +104,9 @@ def _pick(raw: str, target: str) -> Optional[str]:
     for path, code in blocks:
         if path.replace("\\", "/").lstrip("./") == target:
             return code
-    if len(blocks) == 1:
-        return blocks[0][1]
-    return _single_block(raw)
+    if not blocks:  # model ignored the FILE: format: accept a lone unlabeled fence
+        return _single_block(raw)
+    return None  # it returned other files only: never overwrite the target with them
 
 
 def _load_current(ws: Workspace, file_path: Optional[str], content: Optional[str]) -> Tuple[str, str]:

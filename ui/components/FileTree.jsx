@@ -60,7 +60,7 @@ export default function FileTree({ tree, activePath, onOpen, onRefresh, loaded }
     else if (e.key === 'ArrowLeft' && row.type === 'directory') { e.preventDefault(); toggle(row.path, false); }
     else if (e.key === 'Home') { e.preventDefault(); focusRow(rows[0].path); }
     else if (e.key === 'End') { e.preventDefault(); focusRow(rows[rows.length - 1].path); }
-    else if (e.key === 'Enter' || e.key === ' ') {
+    else if (e.key === 'Enter') {
       e.preventDefault();
       row.type === 'directory' ? toggle(row.path) : onOpen(row.path);
     }

@@ -251,3 +251,25 @@ def test_empty_model_reply_is_a_clean_error(monkeypatch):
     monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(200, json={"choices": [{"message": {"content": "  "}}]}))
     with pytest.raises(ModelError):
         HostedClient(Settings(model_backend="hosted", llm_provider="nvidia", llm_api_key="k")).complete("s", "u")
+
+
+# ------------------------------------------------------------------ parsing
+def test_parse_files_keeps_inner_code_fences_and_drops_truncated_blocks():
+    from agent.service import parse_files
+
+    raw = (
+        "FILE: README.md\n```markdown\n# T\n\n```bash\npip install x\n```\n\nMore docs.\n```\n\n"
+        "FILE: main.py\n```python\nprint(1)\n```\n\nFILE: cut.py\n```python\nprint("
+    )
+    files = dict(parse_files(raw))
+    assert files["README.md"].endswith("More docs.") and "```bash" in files["README.md"]
+    assert files["main.py"] == "print(1)"
+    assert "cut.py" not in files
+
+
+def test_edit_never_overwrites_target_with_a_different_files_block(client, stub):
+    client.post("/api/files/save", json={"path": "a.py", "content": "x = 1\n"}, headers=auth())
+    stub.reply = "FILE: other.py\n```python\ny = 2\n```"
+    r = client.post("/api/edit", json={"prompt": "go", "file_path": "a.py"}, headers=auth())
+    assert r.status_code == 502
+    assert client.get("/api/files/content", params={"path": "a.py"}, headers=auth()).json()["content"] == "x = 1\n"

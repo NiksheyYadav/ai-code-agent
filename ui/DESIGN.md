@@ -14,7 +14,7 @@ Principle: **a focused workspace, not a landing page.** The product is the edito
 - One accent (violet). Used only for the primary action, focus rings and the active selection. Semantic `success` / `warn` / `danger`.
 - Type: Geist Sans + Geist Mono (self-hosted via `geist`). Scale 12 / 13 / 14 / 16 / 20 / 28, weights 400 / 500 / 600. UI and code are 13px.
 - Spacing on a 4px grid. Radius: 6px controls, 10px panels, 14px composer.
-- Contrast: all text pairs meet WCAG 2.2 AA in both themes (verified by script, see below).
+- Contrast: all text pairs meet WCAG 2.2 AA in both themes (checked with a contrast script).
 
 ## Motion
 - 120–180ms, ease-out for enter, spring only for layout. Animate `opacity` and `transform` only.

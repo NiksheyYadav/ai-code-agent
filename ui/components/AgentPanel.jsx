@@ -8,7 +8,6 @@ const LABEL = { generate: 'Generate', edit: 'Edit', fix: 'Fix' };
 function Entry({ item }) {
   return (
     <m.li
-      layout="position"
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}

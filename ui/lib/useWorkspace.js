@@ -21,7 +21,10 @@ export function useWorkspace() {
   const [needsKey, setNeedsKey] = useState(false);
 
   const buffersRef = useRef(buffers);
+  const busyRef = useRef(false);
+  const proposalRef = useRef(null);
   buffersRef.current = buffers;
+  proposalRef.current = proposal;
 
   const handleError = useCallback((e) => {
     if (e && e.status === 401) setNeedsKey(true);
@@ -102,17 +105,23 @@ export function useWorkspace() {
     [handleError]
   );
 
-  const closeTab = useCallback(
-    (path) => {
-      setOpen((o) => {
-        const next = o.filter((p) => p !== path);
-        setActive((a) => (a === path ? next[next.length - 1] ?? null : a));
-        return next;
-      });
-      setProposal((p) => (p && p.path === path ? null : p));
-    },
-    []
-  );
+  const closeTab = useCallback((path) => {
+    const p = proposalRef.current;
+    setBuffers((b) => {
+      const buf = b[path];
+      if (!buf) return b;
+      // closing mid-review rejects the proposal; clean buffers are dropped so reopening re-reads the disk
+      const text = p && p.path === path ? p.original : buf.text;
+      if (text === buf.saved) {
+        const { [path]: _gone, ...rest } = b;
+        return rest;
+      }
+      return { ...b, [path]: { ...buf, text } };
+    });
+    setProposal((cur) => (cur && cur.path === path ? null : cur));
+    setOpen((o) => o.filter((x) => x !== path));
+    setActive((a) => (a === path ? null : a));
+  }, []);
 
   // ---- agent ----------------------------------------------------------------
   const patchThread = (id, patch) => setThread((t) => t.map((x) => (x.id === id ? { ...x, ...patch } : x)));
@@ -120,8 +129,12 @@ export function useWorkspace() {
   const run = useCallback(
     async (kind, prompt) => {
       const text = (prompt || '').trim();
-      if (busy) return false;
+      if (busyRef.current) return false;
       if (kind !== 'fix' && !text) return false;
+      if (kind !== 'generate' && proposalRef.current) {
+        toast.error('Accept or reject the pending changes first.');
+        return false;
+      }
       const path = active;
       if (kind !== 'generate' && !path) {
         toast.error('Open a file first');
@@ -130,13 +143,22 @@ export function useWorkspace() {
 
       const id = nextId++;
       setThread((t) => [...t, { id, kind, prompt: text, path: kind === 'generate' ? null : path, status: 'running', stage: 'Thinking…' }]);
+      busyRef.current = true;
       setBusy(true);
       try {
         if (kind === 'generate') {
           const res = await apiFetch('/api/generate', { method: 'POST', body: { prompt: text } });
           patchThread(id, { stage: 'Writing files…' });
           if (res.file_path && typeof res.code === 'string') {
-            setBuffers((b) => ({ ...b, [res.file_path]: { saved: res.code, text: res.code } }));
+            // generate rewrites files on disk: drop cached copies of every written file so tabs never show stale content
+            const written = new Set(res.files || [res.file_path]);
+            setBuffers((b) => {
+              const next = { ...b };
+              written.forEach((p) => delete next[p]);
+              next[res.file_path] = { saved: res.code, text: res.code };
+              return next;
+            });
+            setOpen((o) => o.filter((p) => !written.has(p) || p === res.file_path));
             activate(res.file_path);
           }
           await loadTree();
@@ -166,10 +188,11 @@ export function useWorkspace() {
         handleError(e);
         return false;
       } finally {
+        busyRef.current = false;
         setBusy(false);
       }
     },
-    [active, busy, activate, loadTree, setText, handleError]
+    [active, activate, loadTree, setText, handleError]
   );
 
   const acceptProposal = useCallback(async () => {

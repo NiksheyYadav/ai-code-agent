@@ -172,7 +172,7 @@ export default function Home() {
               <m.div key="hero" {...fade} className="grid h-full place-items-center overflow-y-auto px-4 py-10">
                 <div className="w-full max-w-[680px]">
                   <h1 className="text-2xl font-semibold tracking-tight">What do you want to build?</h1>
-                  <p className="mb-5 mt-1 text-base text-muted">Describe it in plain English. You review every change before it is saved.</p>
+                  <p className="mb-5 mt-1 text-base text-muted">Describe it in plain English. Edits and fixes are shown as a diff for you to accept before anything is saved.</p>
 
                   <Composer ref={composer} variant="hero" autoFocus {...composerProps} mode="generate" />
 
