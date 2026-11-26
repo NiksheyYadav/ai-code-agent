@@ -252,7 +252,8 @@ export default function Home() {
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={commands} files={flattenFiles(ws.tree)} onOpenFile={openFile} />
       <SettingsDialog
         open={settingsOpen}
-        onClose={() => { setSettingsOpen(false); ws.setNeedsKey(false); }}
+        onClose={() => { setSettingsOpen(false); ws.setNeedsKey(false); ws.setKeyRejected(false); }}
+        notice={ws.keyRejected ? 'Your saved key was rejected by the server. Enter a valid key.' : ''}
         authRequired={ws.health.authRequired}
         onSaved={ws.reload}
       />

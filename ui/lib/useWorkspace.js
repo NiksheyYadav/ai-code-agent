@@ -19,6 +19,7 @@ export function useWorkspace() {
   const [thread, setThread] = useState([]);
   const [busy, setBusy] = useState(false);
   const [needsKey, setNeedsKey] = useState(false);
+  const [keyRejected, setKeyRejected] = useState(false);
 
   const buffersRef = useRef(buffers);
   const busyRef = useRef(false);
@@ -27,7 +28,10 @@ export function useWorkspace() {
   proposalRef.current = proposal;
 
   const handleError = useCallback((e) => {
-    if (e && e.status === 401) setNeedsKey(true);
+    if (e && e.status === 401) {
+      setKeyRejected(!!getApiKey());
+      setNeedsKey(true);
+    }
     toast.error(e?.message || 'Something went wrong');
   }, []);
 
@@ -46,8 +50,10 @@ export function useWorkspace() {
       const data = await apiFetch('/api/tree');
       setTree(Array.isArray(data) ? data : []);
     } catch (e) {
-      if (e.status === 401) setNeedsKey(true);
-      else if (e.status === undefined) setHealth({ state: 'offline' });
+      if (e.status === 401) {
+        setKeyRejected(!!getApiKey());
+        setNeedsKey(true);
+      } else if (e.status === undefined) setHealth({ state: 'offline' });
     } finally {
       setTreeLoaded(true);
     }
@@ -215,6 +221,6 @@ export function useWorkspace() {
 
   return {
     health, tree, treeLoaded, open, active, buffers, dirty, proposal, thread, busy, needsKey,
-    setNeedsKey, reload, openFile, setActive, setText, saveFile, closeTab, run, acceptProposal, rejectProposal,
+    keyRejected, setKeyRejected, setNeedsKey, reload, openFile, setActive, setText, saveFile, closeTab, run, acceptProposal, rejectProposal,
   };
 }
