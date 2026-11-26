@@ -1,343 +1,262 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Head from 'next/head';
-import dynamic from 'next/dynamic';
-import { motion, AnimatePresence } from 'framer-motion';
-import { FiCode, FiFolder, FiSave, FiPlay, FiEdit, FiTool, FiMenu, FiX } from 'react-icons/fi';
-
-import CodeEditor from '../components/CodeEditor';
+import { AnimatePresence, m } from 'framer-motion';
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
+import { Toaster } from 'sonner';
+import AgentPanel from '../components/AgentPanel';
+import CommandPalette from '../components/CommandPalette';
+import Composer from '../components/Composer';
+import EditorPane from '../components/EditorPane';
 import FileTree from '../components/FileTree';
-import AnimatedText from '../components/AnimatedText';
-import { apiFetch, getApiKey, setApiKey } from '../lib/api';
+import Header from '../components/Header';
+import SettingsDialog from '../components/SettingsDialog';
+import { API_URL } from '../lib/api';
+import { useIsMac, useMediaQuery, useTheme } from '../lib/hooks';
+import { useWorkspace } from '../lib/useWorkspace';
 
-// Dynamically import the WebGL background to prevent SSR issues
-const WebGLBackground = dynamic(() => import('../components/WebGLBackground'), {
-  ssr: false,
-});
+const SUGGESTIONS = [
+  'A FastAPI todo API with tests',
+  'A React login form with validation',
+  'A Python script that renames files by date',
+  'A Flask app with three JSON routes',
+];
+
+const fade = { initial: { opacity: 0, y: 6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0 }, transition: { duration: 0.16, ease: [0.16, 1, 0.3, 1] } };
+
+function flattenFiles(nodes, out = []) {
+  for (const n of nodes) (n.type === 'directory' ? flattenFiles(n.children || [], out) : out.push(n.path));
+  return out;
+}
 
 export default function Home() {
-  const [task, setTask] = useState('');
-  const [fileTree, setFileTree] = useState([]);
-  const [activeFile, setActiveFile] = useState(null);
-  const [code, setCode] = useState('');
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
+  const ws = useWorkspace();
+  const { theme, toggle: toggleTheme } = useTheme();
+  const mac = useIsMac();
+  const mod = mac ? '⌘' : 'Ctrl+';
+  const isMobile = useMediaQuery('(max-width: 767px)');
 
-  const [apiKey, setApiKeyState] = useState('');
-  // `loaded` is the last content handed to the editor; `code` is the live buffer.
-  const [loaded, setLoaded] = useState(null);
-  const editorFile = useMemo(
-    () => (loaded ? { path: loaded.path, name: loaded.path.split('/').pop(), content: loaded.content } : null),
-    [loaded]
+  const [prompt, setPrompt] = useState('');
+  const [mode, setMode] = useState('generate');
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobileTab, setMobileTab] = useState('agent');
+  const [filesCollapsed, setFilesCollapsed] = useState(false);
+  const filesPanel = useRef(null);
+  const composer = useRef(null);
+
+  const hasFile = !!ws.active;
+  const effectiveMode = hasFile ? mode : 'generate';
+  const hasWorkspace = ws.tree.length > 0 || ws.open.length > 0;
+
+  useEffect(() => {
+    if (ws.needsKey) setSettingsOpen(true);
+  }, [ws.needsKey]);
+
+  const handleRun = useCallback(async () => {
+    const ok = await ws.run(effectiveMode, prompt);
+    if (ok) {
+      setPrompt('');
+      setMobileTab('code');
+    }
+  }, [ws, effectiveMode, prompt]);
+
+  const openFile = useCallback(
+    async (p) => {
+      await ws.openFile(p);
+      setMobileTab('code');
+    },
+    [ws]
   );
 
-  useEffect(() => {
-    setApiKeyState(getApiKey());
+  const toggleFiles = useCallback(() => {
+    if (isMobile) return setMobileTab('files');
+    const p = filesPanel.current;
+    if (!p) return;
+    p.isCollapsed() ? p.expand() : p.collapse();
+  }, [isMobile]);
+
+  const focusComposer = useCallback((nextMode) => {
+    if (nextMode) setMode(nextMode);
+    setMobileTab('agent');
+    setTimeout(() => composer.current?.focus(), 0);
   }, []);
 
-  const fetchFileTree = useCallback(async () => {
-    setIsLoading(true);
-    setError('');
-    try {
-      const data = await apiFetch('/api/tree');
-      setFileTree(Array.isArray(data) ? data : []);
-    } catch (e) {
-      setFileTree([]);
-      setError(e.message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
+  // Global shortcuts. The editor handles its own Mod-S and marks the event handled.
   useEffect(() => {
-    fetchFileTree();
-  }, [fetchFileTree]);
+    const onKey = (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.defaultPrevented) return;
+      const k = e.key.toLowerCase();
+      if (k === 'k') { e.preventDefault(); setPaletteOpen((o) => !o); }
+      else if (k === 's') { e.preventDefault(); if (ws.active) ws.saveFile(ws.active); }
+      else if (k === 'b') { e.preventDefault(); toggleFiles(); }
+      else if (k === '/') { e.preventDefault(); focusComposer(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [ws, toggleFiles, focusComposer]);
 
-  const handleApiKeyChange = (value) => {
-    setApiKeyState(value);
-    setApiKey(value.trim());
+  const commands = useMemo(
+    () => [
+      { id: 'gen', label: 'Generate new files…', hint: `${mod}/`, run: () => focusComposer('generate') },
+      { id: 'edit', label: 'Edit the open file…', disabled: !hasFile, run: () => focusComposer('edit') },
+      { id: 'fix', label: 'Fix the open file', disabled: !hasFile, run: () => ws.run('fix', prompt) },
+      { id: 'save', label: 'Save file', hint: `${mod}S`, disabled: !hasFile, run: () => ws.active && ws.saveFile(ws.active) },
+      { id: 'files', label: 'Toggle file tree', hint: `${mod}B`, run: toggleFiles },
+      { id: 'theme', label: `Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`, run: toggleTheme },
+      { id: 'refresh', label: 'Refresh files', run: ws.reload },
+      { id: 'settings', label: 'Settings / API key', run: () => setSettingsOpen(true) },
+    ],
+    [mod, hasFile, ws, prompt, theme, toggleFiles, toggleTheme, focusComposer]
+  );
+
+  const composerProps = {
+    value: prompt,
+    onChange: setPrompt,
+    onSubmit: handleRun,
+    busy: ws.busy,
+    mode: effectiveMode,
+    onModeChange: setMode,
+    hasFile,
+    mod,
   };
 
-  const handleFileClick = useCallback(async (path) => {
-    if (!path) return;
-    setIsLoading(true);
-    setError('');
-    try {
-      const data = await apiFetch(`/api/files/content?path=${encodeURIComponent(path)}`);
-      setActiveFile(path);
-      setCode(data.content || '');
-      setLoaded({ path, content: data.content || '' });
-    } catch (e) {
-      setError(`Failed to load ${path}: ${e.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+  const filesNode = (
+    <FileTree tree={ws.tree} loaded={ws.treeLoaded} activePath={ws.active} onOpen={openFile} onRefresh={ws.reload} />
+  );
+  const editorNode = (
+    <EditorPane
+      open={ws.open}
+      active={ws.active}
+      buffers={ws.buffers}
+      dirty={ws.dirty}
+      proposal={ws.proposal}
+      onSelect={ws.setActive}
+      onClose={ws.closeTab}
+      onChange={ws.setText}
+      onSave={ws.saveFile}
+      onAccept={ws.acceptProposal}
+      onReject={ws.rejectProposal}
+      mod={mod}
+    />
+  );
+  const agentNode = <AgentPanel thread={ws.thread} composerProps={composerProps} composerRef={composer} />;
 
-  const handleSaveFile = useCallback(async () => {
-    if (!activeFile) return;
-    setIsLoading(true);
-    setError('');
-    try {
-      await apiFetch('/api/files/save', { method: 'POST', body: { path: activeFile, content: code } });
-    } catch (e) {
-      setError(e.message || 'Failed to save the file.');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [activeFile, code]);
-
-  const handleApiCall = useCallback(async (endpoint) => {
-    setIsLoading(true);
-    setError('');
-    try {
-      // Edit/fix act on the file open in the editor (including unsaved changes).
-      const body = { prompt: task };
-      if (endpoint !== 'generate') {
-        body.file_path = activeFile;
-        body.content = code;
-      }
-      const result = await apiFetch(`/api/${endpoint}`, { method: 'POST', body });
-      if (result.file_path) setActiveFile(result.file_path);
-      if (typeof result.code === 'string') {
-        setCode(result.code);
-        if (result.file_path) setLoaded({ path: result.file_path, content: result.code });
-      }
-      await fetchFileTree();
-    } catch (e) {
-      setError(e.message || `The ${endpoint} request failed.`);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [task, activeFile, code, fetchFileTree]);
-
+  const last = ws.thread[ws.thread.length - 1];
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white font-sans flex flex-col items-center overflow-x-hidden">
+    <>
       <Head>
-        <title>CodeNex AI - AI Ready</title>
-        <link rel="icon" href="/favicon.ico" />
+        <title>CodeNex — AI code workspace</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="description" content="Describe what to build. Review every change before it is saved." />
       </Head>
 
-      <motion.header 
-        initial={{ y: -100, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        transition={{ duration: 0.5, ease: 'easeOut' }}
-        className="fixed top-0 left-0 right-0 z-50 bg-gray-900/50 backdrop-blur-lg border-b border-gray-800/50"
-      >
-        <div className="w-full max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center space-x-4">
-              <FiCode className="h-8 w-8 text-blue-400" />
-              <span className="text-xl font-bold tracking-tight">CodeNex AI</span>
-            </div>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => handleApiKeyChange(e.target.value)}
-              onBlur={fetchFileTree}
-              placeholder="API key"
-              aria-label="API key"
-              autoComplete="off"
-              className="ml-auto mr-3 w-40 px-3 py-1.5 text-sm bg-white/5 border border-white/10 rounded-lg text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-            />
-            <button 
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              className="p-2 rounded-md text-gray-400 hover:text-white hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white"
-            >
-              {isSidebarOpen ? <FiX /> : <FiMenu />}
-            </button>
-          </div>
-        </div>
-      </motion.header>
+      <div className="flex h-full flex-col">
+        <Header
+          health={ws.health}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          onPalette={() => setPaletteOpen(true)}
+          onSettings={() => setSettingsOpen(true)}
+          onToggleFiles={toggleFiles}
+          showFilesToggle={hasWorkspace && !isMobile}
+          mod={mod}
+        />
 
-      <main className="flex-1 flex flex-col w-full min-h-screen">
-        {/* Background elements */}
-        <div className="fixed inset-0 z-[-1] opacity-10">
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,#4f4f4f2e_1px,transparent_1px),linear-gradient(to_bottom,#4f4f4f2e_1px,transparent_1px)] bg-[size:14px_24px]"></div>
-          <div className="absolute inset-0 bg-[radial-gradient(circle_500px_at_50%_200px,#3b82f633,transparent)]"></div>
-        </div>
-        <div className="fixed top-0 left-0 w-full h-full z-[-2]">
-          <WebGLBackground />
-        </div>
+        <main className="min-h-0 flex-1">
+          <AnimatePresence mode="wait" initial={false}>
+            {!ws.treeLoaded ? (
+              <m.div key="loading" {...fade} className="h-full" />
+            ) : !hasWorkspace ? (
+              /* ---------------- Empty state: one centred composer ---------------- */
+              <m.div key="hero" {...fade} className="grid h-full place-items-center overflow-y-auto px-4 py-10">
+                <div className="w-full max-w-[680px]">
+                  <h1 className="text-2xl font-semibold tracking-tight">What do you want to build?</h1>
+                  <p className="mb-5 mt-1 text-base text-muted">Describe it in plain English. Edits and fixes are shown as a diff for you to accept before anything is saved.</p>
 
-        {/* Hero Section - Centered Content */}
-        <div className="flex-1 flex flex-col items-center justify-center w-full px-4 sm:px-6 lg:px-8">
-          <div className="relative z-10 text-center w-full max-w-4xl">
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.8, ease: 'easeOut' }}
-              className="mx-auto"
-            >
-              <h1 className="text-5xl md:text-7xl font-bold tracking-tighter mb-4 bg-clip-text text-transparent bg-gradient-to-br from-blue-400 via-purple-400 to-pink-500">
-                <AnimatedText text="CodeNex AI" />
-              </h1>
-              <p className="text-lg md:text-xl text-gray-300 max-w-2xl mx-auto mb-6">
-                <AnimatedText text="AI-Powered Code Generation & Analysis" delay={0.2} />
-              </p>
-              <div className="flex items-center justify-center space-x-3 text-sm text-gray-400">
-                <span className="inline-block w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                <span>Active</span>
-              </div>
-            </motion.div>
-          </div>
-        </div>
-        
-        <div className="relative z-10 flex-1 flex flex-row overflow-hidden w-full mb-8">
-          <AnimatePresence>
-            {isSidebarOpen && (
-              <motion.div
-                initial={{ x: '-100%', opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                exit={{ x: '-100%', opacity: 0 }}
-                transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-                className="w-72 lg:w-80 flex-shrink-0 mr-4 h-[calc(100vh-12rem)]"
-              >
-                <div className="h-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-2xl flex flex-col transform transition-all duration-300 hover:shadow-blue-500/20 hover:border-blue-400/30">
-                  <motion.h2 
-                    className="text-xl font-bold mb-5 flex items-center text-gray-200"
-                    initial={{ x: -10, opacity: 0 }}
-                    animate={{ x: 0, opacity: 1 }}
-                    transition={{ delay: 0.2 }}
-                  >
-                    <FiFolder className="mr-3 text-blue-400" />
-                    Project Files
-                  </motion.h2>
-                  <div className="overflow-y-auto flex-grow custom-scrollbar pr-2 hover:pr-1 transition-all duration-300">
-                    <FileTree files={fileTree} onFileSelect={(node) => handleFileClick(node.path)} selectedFile={activeFile ? { path: activeFile } : null} onRefresh={fetchFileTree} />
+                  <Composer ref={composer} variant="hero" autoFocus {...composerProps} mode="generate" />
+
+                  <div className="mt-4 flex flex-wrap gap-2" aria-label="Suggestions">
+                    {SUGGESTIONS.map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => { setPrompt(s); composer.current?.focus(); }}
+                        className="rounded-full border border-border px-3 py-1.5 text-sm text-muted transition-colors duration-100 hover:border-border-strong hover:bg-hover hover:text-fg"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div role="status" aria-live="polite" className="mt-5 min-h-[24px] text-sm">
+                    {ws.busy && <span className="text-muted">{last?.stage || 'Working…'}</span>}
+                    {!ws.busy && last?.status === 'error' && <span className="text-danger">{last.message}</span>}
+                    {ws.health.state === 'offline' && (
+                      <p className="text-warn">
+                        Can’t reach the API at <span className="font-mono">{API_URL}</span>. Start it with{' '}
+                        <span className="font-mono">uvicorn agent.server:create_app --factory --port 8000</span>.
+                      </p>
+                    )}
                   </div>
                 </div>
-              </motion.div>
+              </m.div>
+            ) : isMobile ? (
+              /* ---------------- Mobile: one pane at a time ---------------- */
+              <m.div key="mobile" {...fade} className="flex h-full flex-col">
+                <div className="min-h-0 flex-1 bg-panel">
+                  {mobileTab === 'files' && filesNode}
+                  {mobileTab === 'code' && editorNode}
+                  {mobileTab === 'agent' && agentNode}
+                </div>
+                <div role="tablist" aria-label="Workspace view" className="grid shrink-0 grid-cols-3 border-t border-border bg-panel">
+                  {[['files', 'Files'], ['code', 'Code'], ['agent', 'Agent']].map(([id, label]) => (
+                    <button
+                      key={id}
+                      role="tab"
+                      aria-selected={mobileTab === id}
+                      onClick={() => setMobileTab(id)}
+                      className={`h-12 text-sm font-medium ${mobileTab === id ? 'text-accent-text' : 'text-muted'}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </m.div>
+            ) : (
+              /* ---------------- Desktop: three resizable panes ---------------- */
+              <m.div key="workspace" {...fade} className="h-full">
+                <PanelGroup direction="horizontal" autoSaveId="codenex-layout">
+                  <Panel
+                    id="files" order={1} ref={filesPanel} defaultSize={18} minSize={12} maxSize={32}
+                    collapsible collapsedSize={0}
+                    onCollapse={() => setFilesCollapsed(true)} onExpand={() => setFilesCollapsed(false)}
+                    className="bg-panel"
+                  >
+                    {!filesCollapsed && filesNode}
+                  </Panel>
+                  <PanelResizeHandle className="w-px" />
+                  <Panel id="editor" order={2} minSize={30}>
+                    {editorNode}
+                  </Panel>
+                  <PanelResizeHandle className="w-px" />
+                  <Panel id="agent" order={3} defaultSize={28} minSize={20} maxSize={45} className="bg-panel">
+                    {agentNode}
+                  </Panel>
+                </PanelGroup>
+              </m.div>
             )}
           </AnimatePresence>
+        </main>
+      </div>
 
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <motion.div 
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.5, delay: 0.2 }}
-              className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 mb-6 shadow-2xl"
-            >
-              <textarea
-                id="taskInput"
-                name="taskInput"
-                className="w-full p-4 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 text-gray-200 placeholder-gray-400 resize-none transition-all duration-300"
-                rows="3"
-                placeholder="Enter your task or prompt here..."
-                value={task}
-                onChange={(e) => setTask(e.target.value)}
-                aria-label="Task input field"
-              />
-              <div className="flex items-center justify-between mt-5">
-                <div className="flex space-x-3">
-                  <motion.button
-                    onClick={() => handleApiCall('generate')}
-                    disabled={!task.trim() || isLoading}
-                    whileHover={!task.trim() || isLoading ? {} : { scale: 1.05, y: -2 }}
-                    whileTap={!task.trim() || isLoading ? {} : { scale: 0.98 }}
-                    className={`px-5 py-2.5 rounded-xl font-medium text-sm tracking-wide transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
-                      !task.trim() || isLoading
-                        ? 'bg-gray-600/50 text-gray-400 cursor-not-allowed'
-                        : 'bg-gradient-to-r from-blue-500 to-blue-600 text-white shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30'
-                    }`}
-                  >
-                    <span className="flex items-center justify-center">
-                      {isLoading ? (
-                        <>
-                          <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          Generating...
-                        </>
-                      ) : (
-                        <>
-                          <FiPlay className="mr-2" />
-                          Generate
-                        </>
-                      )}
-                    </span>
-                  </motion.button>
-                  
-                  <motion.button 
-                    onClick={() => handleApiCall('edit')} 
-                    disabled={isLoading || !activeFile}
-                    whileHover={isLoading || !activeFile ? {} : { scale: 1.05, y: -2 }}
-                    whileTap={isLoading || !activeFile ? {} : { scale: 0.98 }}
-                    className={`px-5 py-2.5 rounded-xl font-medium text-sm tracking-wide transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${
-                      isLoading || !activeFile
-                        ? 'bg-gray-600/50 text-gray-400 cursor-not-allowed'
-                        : 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-lg shadow-green-500/20 hover:shadow-green-500/30'
-                    }`}
-                  >
-                    <FiEdit className="inline mr-2" />
-                    Edit
-                  </motion.button>
-                  
-                  <motion.button 
-                    onClick={() => handleApiCall('fix')} 
-                    disabled={isLoading || !activeFile}
-                    whileHover={isLoading || !activeFile ? {} : { scale: 1.05, y: -2 }}
-                    whileTap={isLoading || !activeFile ? {} : { scale: 0.98 }}
-                    className={`px-5 py-2.5 rounded-xl font-medium text-sm tracking-wide transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 ${
-                      isLoading || !activeFile
-                        ? 'bg-gray-600/50 text-gray-400 cursor-not-allowed'
-                        : 'bg-gradient-to-r from-red-500 to-red-600 text-white shadow-lg shadow-red-500/20 hover:shadow-red-500/30'
-                    }`}
-                  >
-                    <FiTool className="inline mr-2" />
-                    Fix
-                  </motion.button>
-                </div>
-                
-                <motion.button 
-                  onClick={handleSaveFile} 
-                  disabled={isLoading || !activeFile}
-                  whileHover={isLoading || !activeFile ? {} : { scale: 1.05, y: -2 }}
-                  whileTap={isLoading || !activeFile ? {} : { scale: 0.98 }}
-                  className={`px-5 py-2.5 rounded-xl font-medium text-sm tracking-wide transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 ${
-                    isLoading || !activeFile
-                      ? 'bg-gray-600/50 text-gray-400 cursor-not-allowed'
-                      : 'bg-gradient-to-r from-purple-500 to-purple-600 text-white shadow-lg shadow-purple-500/20 hover:shadow-purple-500/30'
-                  }`}
-                >
-                  <FiSave className="inline mr-2" />
-                  Save File
-                </motion.button>
-              </div>
-              {error && <p className="text-red-400 mt-2">Error: {error}</p>}
-              {isLoading && <p className="text-blue-400 mt-2">Processing...</p>}
-            </motion.div>
-
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.5, delay: 0.4 }}
-              className="flex-1 overflow-hidden bg-gray-800/50 backdrop-blur-md border border-gray-700/50 rounded-lg shadow-lg"
-            >
-              <CodeEditor
-                file={editorFile}
-                onCodeChange={setCode}
-                onSave={async (path, content) => {
-                  try {
-                    await apiFetch('/api/files/save', { method: 'POST', body: { path, content } });
-                    setError('');
-                  } catch (e) {
-                    setError(e.message || 'Failed to save the file.');
-                    throw e;
-                  }
-                }}
-                onClose={() => {
-                  setLoaded(null);
-                  setActiveFile(null);
-                  setCode('');
-                }}
-              />
-            </motion.div>
-          </div>
-        </div>
-      </main>
-    </div>
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={commands} files={flattenFiles(ws.tree)} onOpenFile={openFile} />
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => { setSettingsOpen(false); ws.setNeedsKey(false); }}
+        authRequired={ws.health.authRequired}
+        onSaved={ws.reload}
+      />
+      <Toaster theme={theme} position="bottom-right" closeButton />
+    </>
   );
 }

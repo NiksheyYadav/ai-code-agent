@@ -54,7 +54,7 @@ class Settings:
     model_backend: str = "mock"
 
     # Hosted LLM API.
-    llm_provider: str = "anthropic"  # "anthropic" or "openai" (any OpenAI-compatible server)
+    llm_provider: str = "anthropic"  # "anthropic", "openai" (any OpenAI-compatible server) or "nvidia"
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = ""
@@ -88,10 +88,15 @@ class Settings:
 
         origins = [o.strip() for o in (env("CORS_ORIGINS") or "http://localhost:3000").split(",") if o.strip()]
 
+        provider = (env("LLM_PROVIDER") or "anthropic").strip().lower()
+        # NVIDIA's key may be stored as NVIDIA_API_KEY or nvidia_llm_api; LLM_API_KEY wins if set.
+        nvidia_key = env("NVIDIA_API_KEY") or env("nvidia_llm_api") or ""
+        api_key = env("LLM_API_KEY") or (nvidia_key if provider == "nvidia" else "")
+
         return cls(
             model_backend=(env("MODEL_BACKEND") or "mock").strip().lower(),
-            llm_provider=(env("LLM_PROVIDER") or "anthropic").strip().lower(),
-            llm_api_key=env("LLM_API_KEY") or "",
+            llm_provider=provider,
+            llm_api_key=api_key,
             llm_base_url=(env("LLM_BASE_URL") or "").rstrip("/"),
             llm_model=env("LLM_MODEL") or "",
             llm_max_tokens=_int(env("LLM_MAX_TOKENS"), 4096),
@@ -112,8 +117,8 @@ class Settings:
         if self.model_backend not in {"mock", "hosted", "local"}:
             raise ConfigError("MODEL_BACKEND must be one of: mock, hosted, local")
         if self.model_backend == "hosted":
-            if self.llm_provider not in {"anthropic", "openai"}:
-                raise ConfigError("LLM_PROVIDER must be 'anthropic' or 'openai'")
+            if self.llm_provider not in {"anthropic", "openai", "nvidia"}:
+                raise ConfigError("LLM_PROVIDER must be 'anthropic', 'openai' or 'nvidia'")
             if not self.llm_api_key:
                 raise ConfigError("MODEL_BACKEND=hosted requires LLM_API_KEY")
         if not self.auth_disabled and not self.api_key_hashes:

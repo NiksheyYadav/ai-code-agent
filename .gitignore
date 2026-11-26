@@ -42,3 +42,4 @@ test_generation.py
 test_import.py
 test_script.py
 test_server.py
+.claude/

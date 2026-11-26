@@ -24,10 +24,8 @@ Rules:
 
 MAX_FILES_PER_REQUEST = 12
 
-_FILE_BLOCK = re.compile(
-    r"^FILE:[ \t]*(?P<path>[^\r\n]+?)[ \t]*\r?\n```[^\r\n]*\r?\n(?P<code>.*?)\r?\n```[ \t]*$",
-    re.MULTILINE | re.DOTALL,
-)
+_FILE_HEADER = re.compile(r"^FILE:[ \t]*(?P<path>[^\r\n]+?)[ \t]*\r?\n(?P<fence>`{3,})[^\r\n]*\r?\n", re.MULTILINE)
+_CLOSING_FENCE = re.compile(r"^`{3,}[ \t]*$", re.MULTILINE)
 _ANY_FENCE = re.compile(r"```[^\r\n]*\r?\n(?P<code>.*?)\r?\n```", re.DOTALL)
 
 
@@ -39,8 +37,24 @@ class ServiceError(Exception):
 
 
 def parse_files(text: str) -> List[Tuple[str, str]]:
-    """Extract (path, content) pairs from a model response."""
-    return [(m.group("path").strip().strip("`"), m.group("code")) for m in _FILE_BLOCK.finditer(text or "")]
+    """Extract (path, content) pairs from a model response.
+
+    A file's content runs to the LAST bare fence line before the next ``FILE:`` header, so files
+    that themselves contain fenced code (README.md, docs) are not cut at the first inner fence.
+    A block with no closing fence (truncated output) is dropped rather than saved half-written.
+    """
+    text = text or ""
+    headers = list(_FILE_HEADER.finditer(text))
+    files: List[Tuple[str, str]] = []
+    for i, h in enumerate(headers):
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        body = text[h.end():end]
+        closers = list(_CLOSING_FENCE.finditer(body))
+        if not closers:
+            continue
+        code = body[: closers[-1].start()].rstrip("\r\n")
+        files.append((h.group("path").strip().strip("`"), code))
+    return files
 
 
 def _single_block(text: str) -> Optional[str]:
@@ -55,8 +69,10 @@ def _complete(client: ModelClient, user: str) -> str:
         raise ServiceError(502, str(e))
 
 
-def _result(message: str, files: List[str], code: str, warnings: Optional[List[str]] = None) -> Dict:
+def _result(message: str, files: List[str], code: str, warnings: Optional[List[str]] = None, preview: bool = False) -> Dict:
     out = {"status": "success", "message": message, "files": files, "file_path": files[0] if files else None, "code": code}
+    if preview:
+        out["preview"] = True
     if warnings:
         out["warnings"] = warnings
     return out
@@ -88,9 +104,9 @@ def _pick(raw: str, target: str) -> Optional[str]:
     for path, code in blocks:
         if path.replace("\\", "/").lstrip("./") == target:
             return code
-    if len(blocks) == 1:
-        return blocks[0][1]
-    return _single_block(raw)
+    if not blocks:  # model ignored the FILE: format: accept a lone unlabeled fence
+        return _single_block(raw)
+    return None  # it returned other files only: never overwrite the target with them
 
 
 def _load_current(ws: Workspace, file_path: Optional[str], content: Optional[str]) -> Tuple[str, str]:
@@ -106,7 +122,7 @@ def _load_current(ws: Workspace, file_path: Optional[str], content: Optional[str
     return rel, current
 
 
-def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str]) -> Dict:
+def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str], preview: bool = False) -> Dict:
     if not prompt.strip():
         raise ServiceError(400, "Describe the change you want")
     rel, current = _load_current(ws, file_path, content)
@@ -118,6 +134,8 @@ def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[st
     new_code = _pick(raw, rel)
     if new_code is None:
         raise ServiceError(502, "The model did not return an updated file.")
+    if preview:  # propose only; the client saves via /api/files/save once the user accepts
+        return _result(f"Proposed changes to {rel}", [rel], new_code, preview=True)
     try:
         ws.write(rel, new_code)
     except WorkspaceError as e:
@@ -125,7 +143,7 @@ def edit(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[st
     return _result(f"Updated {rel}", [rel], new_code)
 
 
-def fix(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str]) -> Dict:
+def fix(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str], content: Optional[str], preview: bool = False) -> Dict:
     rel, current = _load_current(ws, file_path, content)
     is_python = rel.endswith(".py")
     problem = prompt.strip()
@@ -152,6 +170,8 @@ def fix(ws: Workspace, client: ModelClient, prompt: str, file_path: Optional[str
             ast.parse(fixed)
         except SyntaxError:
             raise ServiceError(422, "The model's fix still has syntax errors; nothing was saved.")
+    if preview:
+        return _result(f"Proposed fix for {rel}", [rel], fixed, preview=True)
     try:
         ws.write(rel, fixed)
     except WorkspaceError as e:

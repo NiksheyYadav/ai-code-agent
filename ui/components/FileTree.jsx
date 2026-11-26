@@ -1,131 +1,124 @@
-import { useState, useEffect } from 'react';
-import { FiChevronRight, FiChevronDown, FiFile, FiFolder, FiFolderPlus, FiRefreshCw } from 'react-icons/fi';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { FiChevronDown, FiChevronRight, FiFile, FiFolder, FiRefreshCw } from 'react-icons/fi';
 
-const FileIcon = ({ type }) => {
-  return type === 'directory' ? (
-    <FiFolder className="text-sky-400 mr-2 flex-shrink-0" />
-  ) : (
-    <FiFile className="text-gray-400 mr-2 flex-shrink-0" />
-  );
-};
+// Flatten visible rows so the tree can be keyboard-navigated like a listbox.
+function flatten(nodes, expanded, depth = 0, out = []) {
+  for (const n of nodes) {
+    out.push({ ...n, depth });
+    if (n.type === 'directory' && expanded.has(n.path)) flatten(n.children || [], expanded, depth + 1, out);
+  }
+  return out;
+}
 
-const TreeNode = ({ node, onFileSelect, selectedFile }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const hasChildren = node.children && node.children.length > 0;
-  const isSelected = selectedFile && selectedFile.path === node.path;
-
-  const toggleExpand = (e) => {
-    e.stopPropagation();
-    if (hasChildren) {
-      setIsExpanded(!isExpanded);
+function allDirs(nodes, out = []) {
+  for (const n of nodes) {
+    if (n.type === 'directory') {
+      out.push(n.path);
+      allDirs(n.children || [], out);
     }
-  };
+  }
+  return out;
+}
 
-  const handleClick = () => {
-    if (node.type === 'file') {
-      onFileSelect(node);
-    } else if (hasChildren) {
-      setIsExpanded(!isExpanded);
-    }
-  };
+export default function FileTree({ tree, activePath, onOpen, onRefresh, loaded }) {
+  const [expanded, setExpanded] = useState(new Set());
+  const [focused, setFocused] = useState(null);
+  const seen = useRef(new Set());
+  const listRef = useRef(null);
 
-  return (
-    <div className="my-1">
-      <div
-        className={`flex items-center py-1 px-2 rounded-md cursor-pointer transition-colors ${isSelected ? 'bg-indigo-600 bg-opacity-50 text-white' : 'hover:bg-gray-700 hover:bg-opacity-50'}`}
-        onClick={handleClick}
-      >
-        <div onClick={toggleExpand} className="w-5 h-5 mr-1 flex items-center justify-center">
-          {hasChildren && (isExpanded ? <FiChevronDown size={14} /> : <FiChevronRight size={14} />)}
-        </div>
-        <FileIcon type={node.type} />
-        <span className="truncate text-sm">{node.name}</span>
-      </div>
-      {isExpanded && hasChildren && (
-        <div className="pl-4 border-l border-gray-700 ml-2">
-          {node.children.map((child) => (
-            <TreeNode key={child.path} node={child} onFileSelect={onFileSelect} selectedFile={selectedFile} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
-
-const FileTree = ({ files, onFileSelect, selectedFile, onRefresh }) => {
-  const [treeData, setTreeData] = useState([]);
-
+  // New folders start expanded the first time we see them.
   useEffect(() => {
-    if (!files) return;
-    
-    // If files is already an array (structured format), use it directly
-    if (Array.isArray(files)) {
-      setTreeData(files);
-    } else if (typeof files === 'string') {
-      // Fallback for string format (legacy)
-      const buildTree = (paths) => {
-        const root = [];
-        const level = { '': { node: { children: root } }};
-        
-        paths.split('\n').forEach((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) return;
-          
-          const isDir = trimmed.endsWith('/');
-          const parts = trimmed.replace(/\/$/, '').split('/');
-          let path = '';
-          
-          parts.reduce((parent, part, index) => {
-            path = path ? `${path}/${part}` : part;
-            
-            if (!level[path]) {
-              const isLastPart = index === parts.length - 1;
-              const node = {
-                name: part,
-                path: isDir && !isLastPart ? `${path}/` : path,
-                type: isDir && !isLastPart ? 'directory' : 'file',
-                children: []
-              };
-              
-              level[path] = { node };
-              if (parent && parent.node) {
-                if (!parent.node.children) {
-                  parent.node.children = [];
-                }
-                parent.node.children.push(node);
-              }
-            }
-            
-            return level[path];
-          }, level['']);
-        });
-        
-        return root;
-      };
-      
-      setTreeData(buildTree(files));
+    const fresh = allDirs(tree).filter((p) => !seen.current.has(p));
+    if (!fresh.length) return;
+    fresh.forEach((p) => seen.current.add(p));
+    setExpanded((e) => new Set([...e, ...fresh]));
+  }, [tree]);
+
+  const rows = useMemo(() => flatten(tree, expanded), [tree, expanded]);
+  const current = focused && rows.some((r) => r.path === focused) ? focused : activePath && rows.some((r) => r.path === activePath) ? activePath : rows[0]?.path;
+
+  const toggle = (path, force) =>
+    setExpanded((e) => {
+      const next = new Set(e);
+      const want = force ?? !next.has(path);
+      want ? next.add(path) : next.delete(path);
+      return next;
+    });
+
+  const focusRow = (path) => {
+    setFocused(path);
+    requestAnimationFrame(() => listRef.current?.querySelector(`[data-path="${CSS.escape(path)}"]`)?.focus());
+  };
+
+  const onKeyDown = (e) => {
+    const i = rows.findIndex((r) => r.path === current);
+    if (i < 0) return;
+    const row = rows[i];
+    if (e.key === 'ArrowDown') { e.preventDefault(); rows[i + 1] && focusRow(rows[i + 1].path); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); rows[i - 1] && focusRow(rows[i - 1].path); }
+    else if (e.key === 'ArrowRight' && row.type === 'directory') { e.preventDefault(); toggle(row.path, true); }
+    else if (e.key === 'ArrowLeft' && row.type === 'directory') { e.preventDefault(); toggle(row.path, false); }
+    else if (e.key === 'Home') { e.preventDefault(); focusRow(rows[0].path); }
+    else if (e.key === 'End') { e.preventDefault(); focusRow(rows[rows.length - 1].path); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      row.type === 'directory' ? toggle(row.path) : onOpen(row.path);
     }
-  }, [files]);
+  };
 
   return (
-    <div className="h-full flex flex-col">
-      <div className="flex justify-between items-center mb-2 px-1">
-        <h3 className="text-base font-semibold text-gray-300">Files</h3>
-        <button onClick={onRefresh} className="text-gray-400 hover:text-white transition-transform transform hover:rotate-180" title="Refresh file tree">
-          <FiRefreshCw className="w-4 h-4" />
+    <div className="flex h-full flex-col">
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3">
+        <h2 className="text-xs font-medium uppercase tracking-wide text-muted">Files</h2>
+        <button onClick={onRefresh} aria-label="Refresh files" className="grid h-6 w-6 place-items-center rounded text-faint hover:bg-hover hover:text-fg">
+          <FiRefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto pr-1">
-        {treeData.length > 0 ? (
-          treeData.map((node) => (
-            <TreeNode key={node.path} node={node} onFileSelect={onFileSelect} selectedFile={selectedFile} />
-          ))
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+        {!loaded ? (
+          <div className="space-y-2 p-2" aria-hidden="true">
+            <div className="skeleton h-3 w-3/4" />
+            <div className="skeleton h-3 w-1/2" />
+            <div className="skeleton h-3 w-2/3" />
+          </div>
+        ) : rows.length === 0 ? (
+          <p className="p-3 text-sm text-faint">No files yet. Describe what to build in the agent panel.</p>
         ) : (
-          <div className="text-gray-500 text-center py-4 text-sm">No files yet. Describe something and press Generate.</div>
+          <ul ref={listRef} role="tree" aria-label="Project files" onKeyDown={onKeyDown}>
+            {rows.map((r) => {
+              const isDir = r.type === 'directory';
+              const isActive = r.path === activePath;
+              return (
+                <li key={r.path} role="none">
+                  <button
+                    role="treeitem"
+                    data-path={r.path}
+                    aria-level={r.depth + 1}
+                    aria-expanded={isDir ? expanded.has(r.path) : undefined}
+                    aria-selected={isActive}
+                    tabIndex={r.path === current ? 0 : -1}
+                    onFocus={() => setFocused(r.path)}
+                    onClick={() => (isDir ? toggle(r.path) : onOpen(r.path))}
+                    style={{ paddingLeft: 8 + r.depth * 14 }}
+                    className={`flex h-7 w-full items-center gap-1.5 rounded-control pr-2 text-left text-sm transition-colors duration-100 ${
+                      isActive ? 'bg-accent/20 text-fg' : 'text-muted hover:bg-hover hover:text-fg'
+                    }`}
+                  >
+                    {isDir ? (
+                      expanded.has(r.path) ? <FiChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /> : <FiChevronRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <span className="w-3.5 shrink-0" />
+                    )}
+                    {isDir ? <FiFolder className="h-3.5 w-3.5 shrink-0 text-accent-text" aria-hidden="true" /> : <FiFile className="h-3.5 w-3.5 shrink-0 text-faint" aria-hidden="true" />}
+                    <span className="truncate">{r.name}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
     </div>
   );
-};
-
-export default FileTree;
+}

@@ -98,3 +98,13 @@ Audit date: 2026-11-19. Branch: `master` (nothing committed by the audit).
 - Nothing is committed. Several tracked-file deletions are staged; review with `git status`, then commit on a branch.
 - Untracked scratch files still on disk (now git-ignored): `check_env.py`, `debug_*.py`, `simple_test.py`, `test_env.py`, `test_generation.py`, `test_import.py`, `test_script.py`, `test_server.py`, `test_output.*`, `0.39.0`, root `node_modules/`. Delete at will.
 - Rotate the Hugging Face token in `.env` if that folder was ever shared (it was never committed).
+
+## 7. Redesign + NVIDIA backend (committed on local branch `ui-redesign`, not pushed)
+
+- **Model:** `LLM_PROVIDER=nvidia` (NVIDIA NIM, OpenAI-compatible). Key read from `NVIDIA_API_KEY` or `nvidia_llm_api`. Default model `nvidia/nemotron-3-ultra-550b-a55b` (the previous default returned HTTP 410/Gone). Verified with live generate and edit calls. The key is also stored as the GitHub Actions secret `NVIDIA_API_KEY`.
+- **UI:** replaced the starfield landing page with a focused workspace (see `ui/DESIGN.md`): centred composer empty state → resizable Files | Editor | Agent panes, CodeMirror 6 editor, diff-review for Edit/Fix (backend `preview` mode), command palette (`Ctrl/⌘+K`), toasts, light/dark themes, mobile tab layout, honest status pill, keyboard-navigable file tree.
+- **Measured:** first-load JS for `/` 345 kB → 159 kB (budget 180 kB). WCAG AA contrast verified by script for every text/background token pair in both themes. `pytest` 34 passed.
+- **Verified in a browser (production build, real NVIDIA model):** generate → open → edit → diff → accept & save → persisted to disk; palette; theme switch; mobile layout.
+- **Not done / next:** real token streaming (SSE) for generation; a stage line is shown instead. No automated UI tests. Screenshot comparison at exact breakpoints was limited by the preview tool cropping; layout was verified through the DOM.
+
+- **Notes:** the `NVIDIA_API_KEY` GitHub secret is stored but no workflow reads it yet. Local `.env` sets `AUTH_DISABLED=true` for dev only; remove it and set `API_KEYS` for the hosted deployment. Saving (Ctrl+S) during a diff review now counts as accept (not re-built/re-verified in a browser).
