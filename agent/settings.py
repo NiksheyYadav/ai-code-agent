@@ -67,6 +67,8 @@ class Settings:
 
     # Hosting / multi-user.
     workspaces_dir: Path = field(default_factory=lambda: REPO_ROOT / "workspaces")
+    # When set, workspace files live in Postgres (needed on serverless hosts with no persistent disk).
+    database_url: str = ""
     auth_disabled: bool = False
     # sha256(api_key) -> user id. Each API key is one tenant with its own workspace.
     api_key_hashes: Dict[str, str] = field(default_factory=dict)
@@ -104,6 +106,7 @@ class Settings:
             local_model=env("LOCAL_MODEL") or "Qwen/Qwen2.5-Coder-1.5B-Instruct",
             hf_token=env("HF_TOKEN") or env("HUGGINGFACE_TOKEN") or "",
             workspaces_dir=Path(env("WORKSPACES_DIR") or (REPO_ROOT / "workspaces")),
+            database_url=env("DATABASE_URL") or env("POSTGRES_URL") or "",
             auth_disabled=_bool(env("AUTH_DISABLED")),
             api_key_hashes=hashes,
             cors_origins=origins,

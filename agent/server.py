@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from . import service
 from .models import ModelClient, build_client
 from .settings import Settings, hash_key
-from .workspace import Workspace, WorkspaceError
+from .workspace import FsStore, PgStore, Workspace, WorkspaceError
 
 
 class RateLimiter:
@@ -91,7 +91,8 @@ def create_app(settings: Optional[Settings] = None, client: Optional[ModelClient
             if not user:
                 raise HTTPException(status_code=401, detail="Missing or invalid API key")
         request.state.user = user
-        return Workspace(settings.workspaces_dir / user, settings.max_file_bytes, settings.max_files_per_workspace)
+        store = PgStore(settings.database_url, user) if settings.database_url else FsStore(settings.workspaces_dir / user)
+        return Workspace(store, settings.max_file_bytes, settings.max_files_per_workspace)
 
     def rate_limited(request: Request, ws: Workspace = Depends(current_workspace)) -> Workspace:
         if not limiter.check(request.state.user):
